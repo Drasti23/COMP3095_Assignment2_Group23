@@ -8,6 +8,7 @@ import java.util.List;
 
 public interface EventService {
    String createEvent(EventRequest eventRequest);
+    boolean isOrganizerAuthorized(String organizerId, String eventLocation);
     List<EventResponse> getAllEvents();
     EventResponse getEventById(String id);
     void deleteEvent(String id);

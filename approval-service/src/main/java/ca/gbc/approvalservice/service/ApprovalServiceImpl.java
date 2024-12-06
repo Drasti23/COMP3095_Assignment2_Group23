@@ -4,9 +4,10 @@ import ca.gbc.approvalservice.dto.ApprovalRequest;
 import ca.gbc.approvalservice.dto.ApprovalResponse;
 import ca.gbc.approvalservice.model.Approval;
 import ca.gbc.approvalservice.repository.ApprovalRepository;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -18,38 +19,32 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class ApprovalServiceImpl implements ApprovalService {
 
-    @Autowired
     private final ApprovalRepository approvalRepository;
-
     private final RestTemplate restTemplate;
 
-
-
-
-    // URLs for communication with EventService and UserService
-    String eventServiceUrl = "http://event-service:9005/api/events/";  // Assuming the EventService is at this URL
-
+    // URL for EventService
+    @Value("${event-service.url}")
+    private String eventServiceUrl;  // Event service URL from application.properties or application.yml
 
     @Override
     public String createApproval(ApprovalRequest approvalRequest,boolean approved) {
         String id = approvalRequest.eventId();
-       if(geteventinfo(id).isEmpty())
+        if(geteventinfo(id).isEmpty())
         {
-           return "Event not found";
-       }
-       else{
-           Approval approval = mapRequestToApproval(approvalRequest);
-           if(approved){
-               approval.setStatus("Approved");
-           }
-           else{
-               approval.setStatus("Rejected");
-           }
-           approvalRepository.save(approval);
-           return "Review added in database successfully";
-       }
+            return "Event not found";
+        }
+        else{
+            Approval approval = mapRequestToApproval(approvalRequest);
+            if(approved){
+                approval.setStatus("Approved");
+            }
+            else{
+                approval.setStatus("Rejected");
+            }
+            approvalRepository.save(approval);
+            return "Review added in database successfully";
+        }
     }
-
 
 
 

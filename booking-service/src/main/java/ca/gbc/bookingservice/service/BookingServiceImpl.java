@@ -4,12 +4,15 @@ import ca.gbc.bookingservice.dto.BookingRequest;
 import ca.gbc.bookingservice.dto.BookingResponse;
 import ca.gbc.bookingservice.model.Booking;
 import ca.gbc.bookingservice.repository.BookingRepository;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.awt.print.Book;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -20,47 +23,82 @@ public class BookingServiceImpl implements BookingService {
 
     private final BookingRepository bookingRepository;
     private final RestTemplate restTemplate;
-    String updateServiceUrl = "http://room-service:9001/api/rooms/";
-    // For inter-service communication with RoomService
+
+    @Value("${service.room.url}")
+    private String updateServiceUrl;
+
+    @Value("${service.room.availability.url}")
+    private String roomServiceUrl;
+
+    private final KafkaTemplate<String, String> kafkaTemplate;
 
     @Override
+    @Retry(name = "roomServiceRetry", fallbackMethod = "roomServiceFallback")
+    @CircuitBreaker(name = "roomServiceCircuitBreaker", fallbackMethod = "roomServiceFallback")
     public BookingResponse createBooking(BookingRequest bookingRequest) {
-        // Check room availability
-        String roomServiceUrl = "http://room-service:9001/api/rooms/availability/" + bookingRequest.roomId();
-        Boolean isAvailable = restTemplate.getForObject(roomServiceUrl, Boolean.class);
+        if (isRoomAvailable(bookingRequest.roomId())) {
+            Booking booking = new Booking();
+            booking.setRoomId(bookingRequest.roomId());
+            booking.setUserName(bookingRequest.userName());
+            booking.setStartTime(bookingRequest.startTime());
+            booking.setEndTime(bookingRequest.endTime());
 
-        if (Boolean.FALSE.equals(isAvailable)) {
+            Booking savedBooking = bookingRepository.save(booking);
+            updateRoomAvailability(bookingRequest.roomId(), false);
+
+            String eventMessage = String.format("Booking created: { id: %s, roomId: %s }",
+                    savedBooking.getId(), savedBooking.getRoomId());
+            kafkaTemplate.send("booking-events", eventMessage);
+            log.info("Booking event published to Kafka: {}", eventMessage);
+            log.info("Successfully created booking for roomId: {}", bookingRequest.roomId());
+
+            return new BookingResponse(
+                    savedBooking.getId(),
+                    savedBooking.getRoomId(),
+                    savedBooking.getUserName(),
+                    savedBooking.getStartTime(),
+                    savedBooking.getEndTime(),
+                    bookingRequest.purpose(),
+                    true
+            );
+        } else {
             throw new IllegalStateException("Room is not available for booking.");
         }
-
-        // Create and save booking
-        Booking booking = new Booking();
-        booking.setRoomId(bookingRequest.roomId());
-        booking.setUserName(bookingRequest.userName());
-        booking.setStartTime(bookingRequest.startTime());
-        booking.setEndTime(bookingRequest.endTime());
-
-        Booking savedBooking = bookingRepository.save(booking);
-        // Update room availability
-        updateRoomAvailability(bookingRequest.roomId(), false);
-
-        return new BookingResponse(
-                savedBooking.getId(),
-                savedBooking.getRoomId(),
-                savedBooking.getUserName(),
-                savedBooking.getStartTime(),
-                savedBooking.getEndTime(),
-                bookingRequest.purpose(),
-                true
-        );
     }
 
-    private void updateRoomAvailability(String roomId, boolean available) {
+    @Retry(name = "roomServiceRetry", fallbackMethod = "roomServiceFallback")
+    @CircuitBreaker(name = "roomServiceCircuitBreaker", fallbackMethod = "roomServiceFallback")
+    private boolean isRoomAvailable(String roomId) {
+        String availabilityUrl = roomServiceUrl + "/" + roomId;
+        try {
+            return restTemplate.getForObject(availabilityUrl, Boolean.class);
+        } catch (Exception e) {
+            log.error("Error checking room availability: {}", e.getMessage());
+            throw new RuntimeException("Room Service is unavailable.");
+        }
+    }
+
+    // Fallback method for Room Service Unavailability
+    public BookingResponse roomServiceFallback(String roomId, Throwable throwable) {
+        log.error("Room Service is unavailable. Error: {}", throwable.getMessage());
+        return new BookingResponse("Room Service Unavailable", null, null, null, null, null, false);
+    }
+
+    @Retry(name = "roomServiceRetry", fallbackMethod = "updateRoomFallback")
+    @CircuitBreaker(name = "roomServiceCircuitBreaker", fallbackMethod = "updateRoomFallback")
+    public void updateRoomAvailability(String roomId, boolean available) {
         String url = String.format("%s/%s/availability?available=%b", updateServiceUrl, roomId, available);
-        restTemplate.put(url, null);
+        try {
+            restTemplate.put(url, null);
+        } catch (Exception e) {
+            updateRoomFallback(roomId, available, e);
+        }
     }
 
-
+    // Fallback method for Room Availability Update failure
+    public void updateRoomFallback(String roomId, boolean available, Throwable throwable) {
+        log.error("Failed to update room availability for roomId: {}. Error: {}", roomId, throwable.getMessage());
+    }
 
     @Override
     public List<BookingResponse> getAllBookings() {
@@ -98,12 +136,7 @@ public class BookingServiceImpl implements BookingService {
 
     @Override
     public Boolean bookingExists(String id) {
-        log.debug("Checking if booking exists with ID: " + id);
-        Booking booking = bookingRepository.findById(id).orElse(null);
-        if (booking != null) {
-            return true;
-        } else {
-            return false;
-        }
+        log.debug("Checking if booking exists with ID: {}", id);
+        return bookingRepository.findById(id).isPresent();
     }
 }
