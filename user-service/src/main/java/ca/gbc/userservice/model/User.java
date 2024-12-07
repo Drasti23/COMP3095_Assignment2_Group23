@@ -24,7 +24,7 @@ public class User {
     private Long id; // Unique identifier for the user (primary key)
 
     private String username; // The username of the user (used for login, etc.)
-    private String password; // The password (hashed, never store plain text passwords)
+  //  private String password; // The password (hashed, never store plain text passwords)
 
     private String email; // The user's email address
 
